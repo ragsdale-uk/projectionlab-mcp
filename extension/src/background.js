@@ -60,9 +60,17 @@ async function connect(force = false) {
     await setStatus("disconnected", "Configure the shared token to connect.");
     return;
   }
+  // The port is interpolated into ws://127.0.0.1:<port>, so a non-integer
+  // value such as "@evil.com/" would change the host the socket dials and
+  // hand the token to that host instead. The options page stores Number(...),
+  // but validate here too so a hand-edited or otherwise poisoned storage
+  // value can never redirect the connection.
+  const port = Number.isInteger(config.port) && config.port >= 1 && config.port <= 65535
+    ? config.port
+    : DEFAULT_PORT;
   authBlocked = false;
   await setStatus("disconnected");
-  const ws = new WebSocket(`ws://127.0.0.1:${config.port}`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   socket = ws;
   ws.onopen = () => {
     if (myGeneration !== generation) return;

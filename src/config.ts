@@ -47,8 +47,12 @@ export const config = {
   // Localhost WebSocket the browser extension (or bootstrap snippet) connects
   // to. The token is a shared secret the executor must present; if unset,
   // ExtensionBridge generates one and persists it under the snapshot dir.
+  // A blank value is treated as unset: `.env` files routinely carry
+  // `PL_WS_TOKEN=` with nothing after it, and an empty string is not nullish,
+  // so without the trim-or-undefined an empty secret would be adopted and
+  // every peer would authenticate.
   wsPort: optionalInt("PL_WS_PORT", 8788),
-  wsToken: process.env.PL_WS_TOKEN,
+  wsToken: process.env.PL_WS_TOKEN?.trim() || undefined,
   appUrl: optional("PL_APP_URL", "https://app.projectionlab.com"),
   apiReadyTimeoutMs: optionalInt("PL_API_READY_TIMEOUT_MS", 30000),
   // How long a full export may be served from cache. Writes always invalidate,
