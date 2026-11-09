@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -19,6 +19,19 @@ import {
   type WireMethod,
 } from "./types/wire.js";
 
+/** The ProjectionLab app origin, resolved once at load. Empty when
+ * PL_APP_URL is malformed: originAllowed runs inside the WebSocket
+ * "connection" handler, where a thrown TypeError is an uncaught exception, so
+ * letting `new URL` throw here would mean any peer carrying an Origin header
+ * could crash the process. Falling back to "" just narrows the allowlist. */
+const APP_ORIGIN = (() => {
+  try {
+    return new URL(config.appUrl).origin;
+  } catch {
+    return "";
+  }
+})();
+
 /** Origins allowed to open the WebSocket. Extensions plus the PL app itself
  * (Tier 0 bootstrap snippet runs in page context, so the browser sends the
  * app origin). Sockets with no Origin header (native clients, e.g. the fake
@@ -28,7 +41,7 @@ function originAllowed(origin: string | undefined): boolean {
   return (
     origin.startsWith("chrome-extension://") ||
     origin.startsWith("moz-extension://") ||
-    origin === new URL(config.appUrl).origin
+    (APP_ORIGIN !== "" && origin === APP_ORIGIN)
   );
 }
 
@@ -64,6 +77,22 @@ function restrictMode(path: string, mode: number): void {
   }
 }
 
+/**
+ * Constant-time token comparison. Both tokens are short and compared once per
+ * connection, so the fixed-cost comparison is free; the length check keeps
+ * timingSafeEqual from throwing and leaks only the length.
+ *
+ * An empty expected token always fails: a blank PL_WS_TOKEN must never make
+ * every peer authenticate, whatever the config layer resolved it to.
+ */
+function tokenMatches(expected: string, presented: unknown): boolean {
+  if (expected.length === 0 || typeof presented !== "string") return false;
+  const expectedBuf = Buffer.from(expected, "utf8");
+  const actualBuf = Buffer.from(presented, "utf8");
+  if (expectedBuf.length !== actualBuf.length) return false;
+  return timingSafeEqual(expectedBuf, actualBuf);
+}
+
 export class ExtensionBridge implements Bridge {
   private wss: WebSocketServer | null = null;
   private conn: WebSocket | null = null;
@@ -83,7 +112,14 @@ export class ExtensionBridge implements Bridge {
   private exportCache: { data: ExportedData; at: number } | null = null;
 
   constructor() {
-    this.token = config.wsToken ?? this.loadOrCreateToken();
+    // Defense in depth: never run with an empty shared secret. A blank
+    // PL_WS_TOKEN means "unset" - generate one rather than let every peer
+    // authenticate and receive the Plugin API key in exportData/validateApiKey.
+    const configured = config.wsToken?.trim();
+    this.token = configured ? configured : this.loadOrCreateToken();
+    if (this.token.length === 0) {
+      throw new Error("Refusing to start: the WebSocket token resolved to an empty string");
+    }
     this.listen();
   }
 
@@ -199,7 +235,7 @@ export class ExtensionBridge implements Bridge {
         ws.close(CLOSE_CODES.AUTH_FAILED, "malformed hello");
         return;
       }
-      if (hello.type !== "hello" || hello.token !== this.token) {
+      if (hello.type !== "hello" || !tokenMatches(this.token, hello.token)) {
         log.warn("extension", `Auth failed for connection from ${origin}`);
         ws.close(CLOSE_CODES.AUTH_FAILED, "bad token");
         return;
